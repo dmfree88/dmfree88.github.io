@@ -4547,6 +4547,16 @@
                 modalBoard.innerHTML += '<div style="text-align: center; padding: 40px; color: var(--text-muted); font-style: italic;">No position data available for this opening</div>';
             }
             
+            // Hide gameDetails and show opening elements when displaying opening
+            const gameDetailsEl = document.getElementById('gameDetails');
+            if (gameDetailsEl) gameDetailsEl.style.display = 'none';
+            
+            const openingElements = ['modalOpeningName', 'modalOpeningMoves', 'modalOpeningDescription', 'modalOpeningStats', 'modalOpeningBoard'];
+            openingElements.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = '';
+            });
+            
             // Show modal
             modal.classList.add('active');
         }
@@ -4858,7 +4868,26 @@ CRITICAL RULES:
                     <h3 style="color: var(--accent-gold); margin-bottom: 16px; display: flex; align-items: center; gap: 12px;">
                         <span style="font-size: 1.5rem;">🎓</span> GM-Level Coaching Analysis
                     </h3>
-
+                    <div id="gemini-analysis-container" style="color: var(--text-primary); line-height: 1.8; font-size: 1rem;">
+                        <button id="gemini-analyze-btn" onclick="triggerGeminiAnalysis()" 
+                            onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 20px rgba(212, 175, 55, 0.4)'"
+                            onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 12px rgba(212, 175, 55, 0.3)'"
+                            style="
+                            padding: 14px 28px;
+                            background: linear-gradient(135deg, var(--accent-gold) 0%, #b8941f 100%);
+                            color: #000;
+                            border: none;
+                            border-radius: 8px;
+                            font-family: 'Rubik', sans-serif;
+                            font-weight: 700;
+                            font-size: 1rem;
+                            cursor: pointer;
+                            transition: all 0.3s ease;
+                            box-shadow: 0 4px 12px rgba(212, 175, 55, 0.3);
+                        ">
+                            🤖 Get GM Analysis from Gemini
+                        </button>
+                    </div>
                 </div>
 
                 <h3 style="margin: 32px 0 16px; color: var(--text-primary);">Games by Result Type (${allGames.length} total games)</h3>
@@ -5482,20 +5511,50 @@ CRITICAL RULES:
         async function showGameDetails(index) {
             const game = allGames[index];
             const modal = document.getElementById('gameModal');
-
-            // Clear any previous game's Stockfish analysis cache and board state
-            // so stale results don't flash while the new game loads
+            
+            // STEP 1: Show loading modal FIRST
+            modal.classList.add('active');
+            const gameDetailsEl = document.getElementById('gameDetails');
+            if (gameDetailsEl) {
+                gameDetailsEl.innerHTML = `
+                    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 400px; gap: 20px;">
+                        <div style="font-size: 3rem; animation: pulse 2s infinite;">♟️</div>
+                        <div style="color: var(--accent-gold); font-size: 1.5rem; font-weight: 600;">Loading Game...</div>
+                        <div id="game-loading-status" style="color: var(--text-secondary);">Preparing game data...</div>
+                    </div>
+                    <style>
+                        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+                    </style>
+                `;
+                gameDetailsEl.style.display = 'block';
+            }
+            
+            // Hide opening elements
+            ['modalOpeningName', 'modalOpeningMoves', 'modalOpeningDescription', 'modalOpeningStats', 'modalOpeningBoard'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = 'none';
+            });
+            
+            // Let loading screen render
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // STEP 2: Prepare data
             if (window.currentGame && window.currentGame !== game) {
-                // Don't delete _parsedData (PGN parse is deterministic), but clear Stockfish
-                // so the new game starts fresh with unanalyzed state
                 delete game._stockfishAnalysis;
             }
-            // Reset board state immediately
             window.currentMoveIndex = 0;
             window.moveHistory = [];
             window.boardPosition = null;
-
+            
+            const updateStatus = (text) => {
+                const el = document.getElementById('game-loading-status');
+                if (el) el.textContent = text;
+            };
+            
+            updateStatus('Parsing PGN moves...');
             const moves = parsePGNWithAnalysis(game);
+            
+            updateStatus('Analyzing game phases...');
             
             const result = getGameResult(game);
             const opening = extractOpening(game.pgn) || 'Unknown Opening';
@@ -5504,9 +5563,10 @@ CRITICAL RULES:
             const playerRating = isWhite ? game.white.rating : game.black.rating;
             const opponentRating = isWhite ? game.black.rating : game.white.rating;
             
-            // Analyze game phases
             const phaseAnalysis = analyzeGamePhases(game, moves);
             const timeAnalysis = analyzeTimeManagement(game);
+            
+            updateStatus('Building game view...');
             
             const html = `
                 <h2 style="font-family: 'Rubik', sans-serif; font-weight: 700; color: var(--accent-gold); margin-bottom: 20px;">
@@ -5737,7 +5797,8 @@ CRITICAL RULES:
 
             document.getElementById('gameDetails').innerHTML = html;
             
-            // Initialize the game board - filter result tokens so length matches moveHistory
+            
+            // STEP 3: Set up game state
             window.currentGameMoves = moves.movesList.filter(m => 
                 m.notation !== '1-0' && m.notation !== '0-1' && m.notation !== '1/2-1/2'
             );
@@ -5746,6 +5807,8 @@ CRITICAL RULES:
             window.currentGame = game;
             window.playerIsWhite = isWhite;
             
+            updateStatus('Building move coordinates...');
+            
             // Build move history with coordinates and quality
             window.moveHistory = [];
             let position = getInitialPosition();
@@ -5753,17 +5816,12 @@ CRITICAL RULES:
             moves.movesList.forEach((move, idx) => {
                 const moveIsWhite = move.color === 'white';
                 
-                // Skip game result notations
                 if (move.notation === '1-0' || move.notation === '0-1' || move.notation === '1/2-1/2') {
                     return;
                 }
                 
-                // Normalize castling notation (some PGNs use 0-0-0 instead of O-O-O)
                 move.notation = move.notation.replace(/^0-0-0$/, 'O-O-O').replace(/^0-0$/, 'O-O');
-                
                 const parsed = parseAlgebraicMove(move.notation, position, moveIsWhite);
-                
-                // Use quality from the parsed analysis
                 const quality = move.quality || 'unanalyzed';
                 
                 if (parsed) {
@@ -5774,11 +5832,8 @@ CRITICAL RULES:
                         quality: quality,
                         notation: move.notation
                     });
-                    
-                    // Apply move to position for next iteration
                     position = applyMove(position, parsed.from, parsed.to, parsed.piece);
                 } else {
-                    // If we can't parse, add dummy data so indices stay aligned
                     window.moveHistory.push({
                         notation: move.notation,
                         quality: quality
@@ -5786,42 +5841,60 @@ CRITICAL RULES:
                 }
             });
             
+            updateStatus('Rendering chess board...');
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            // STEP 4: Initialize board
             initializeGameBoard();
             
-            // Set border color based on result
-            setTimeout(() => {
-                const board = document.getElementById('interactive-board');
-                if (board) {
-                    if (result === 'win') {
-                        board.classList.add('win-border');
-                    } else if (result === 'loss') {
-                        board.classList.add('loss-border');
-                    }
+            // Wait for board to render
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            // Update board styling
+            const board = document.getElementById('interactive-board');
+            if (board) {
+                if (result === 'win') {
+                    board.classList.add('win-border');
+                } else if (result === 'loss') {
+                    board.classList.add('loss-border');
+                }
+            }
+            
+            // Update End button
+            const endBtn = document.getElementById('end-btn');
+            if (endBtn && game) {
+                const termination = getGameTermination(game);
+                let btnText = 'End ⏭';
+                
+                if (termination === 'Checkmate') {
+                    btnText = '♔ Checkmate';
+                } else if (termination === 'Resignation') {
+                    btnText = '🏳️ Resign';
+                } else if (termination === 'Time') {
+                    btnText = '⏱️ Timeout';
+                } else if (termination === 'Stalemate') {
+                    btnText = '⚖️ Stalemate';
+                } else {
+                    btnText = `End (${termination})`;
                 }
                 
-                // Update End button with termination info
-                const endBtn = document.getElementById('end-btn');
-                if (endBtn && game) {
-                    const termination = getGameTermination(game);
-                    let btnText = 'End ⏭';
-                    
-                    if (termination === 'Checkmate') {
-                        btnText = '♔ Checkmate';
-                    } else if (termination === 'Resignation') {
-                        btnText = '🏳️ Resign';
-                    } else if (termination === 'Time') {
-                        btnText = '⏱️ Timeout';
-                    } else if (termination === 'Stalemate') {
-                        btnText = '⚖️ Stalemate';
-                    } else {
-                        btnText = `End (${termination})`;
-                    }
-                    
-                    endBtn.textContent = btnText;
-                }
-            }, 100);
+                endBtn.textContent = btnText;
+            }
             
-            modal.classList.add('active');
+            // STEP 5: Replace loading screen with actual content
+            updateStatus('Almost ready...');
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            if (gameDetailsEl) {
+                gameDetailsEl.innerHTML = html;
+                gameDetailsEl.style.display = 'block';
+            }
+            
+            // Reinitialize board after HTML replacement
+            await new Promise(resolve => setTimeout(resolve, 100));
+            initializeGameBoard();
+            
+            // Modal is already open
             
             // NOW run Stockfish analysis in background and update when done
             analyzeGameWithStockfish(game).then(stockfishQualities => {
@@ -8155,6 +8228,9 @@ CRITICAL RULES:
     <div id="gameModal" class="game-modal">
         <div class="game-modal-content">
             <button class="game-modal-close" onclick="closeGameModal()">×</button>
+            <div id="gameDetails">
+                <!-- Game details will be inserted here by showGameDetails() -->
+            </div>
             <div class="game-modal-header">
                 <div class="game-modal-title" id="modalOpeningName"></div>
                 <div class="game-modal-moves" id="modalOpeningMoves"></div>
